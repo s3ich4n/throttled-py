@@ -80,7 +80,36 @@ The ``HookContext`` is an immutable dataclass containing information about the r
    ``HookContext`` does not include the result. The result is obtained by calling ``call_next()``.
 
 
-4) Creating Custom Hooks
+4) Hook Type Validation
+=======================
+
+``Throttled`` validates hook types at initialization. Sync ``Throttled`` only accepts ``Hook`` instances,
+and async ``Throttled`` only accepts ``AsyncHook`` instances. Passing an invalid type raises ``TypeError``:
+
+.. code-block:: python
+
+   from throttled import Throttled, Hook, per_sec
+   from throttled.asyncio import Throttled as AsyncThrottled
+   from throttled.asyncio.hooks import Hook as AsyncHook
+
+   # ✅ Correct: sync Hook with sync Throttled
+   Throttled(key="/api", quota=per_sec(10), hooks=[MySyncHook()])
+
+   # ✅ Correct: async Hook with async Throttled
+   AsyncThrottled(key="/api", quota=per_sec(10), hooks=[MyAsyncHook()])
+
+   # ❌ TypeError: async Hook with sync Throttled
+   Throttled(key="/api", quota=per_sec(10), hooks=[MyAsyncHook()])
+
+   # ❌ TypeError: non-hook object
+   Throttled(key="/api", quota=per_sec(10), hooks=["not a hook"])
+
+.. note::
+
+   Hooks are stored as a ``tuple`` internally for immutability after construction.
+
+
+5) Creating Custom Hooks
 ========================
 
 To create a custom hook, inherit from ``Hook`` and implement the ``on_limit`` method:
@@ -113,7 +142,7 @@ Best Practices
               result = call_next()
               return result
 
-2. **Handle exceptions gracefully**: If your hook raises an exception, it will be caught and the hook is skipped entirely - the chain continues by calling the next hook directly. To ensure your hook doesn't get skipped, wrap risky operations in try/except:
+2. **Handle exceptions gracefully**: If your hook raises an exception, it will be caught and the hook is skipped entirely - the chain continues by calling the next hook directly. The exception is logged via ``logger.exception()`` using per-module loggers (``throttled.hooks`` for sync, ``throttled.asyncio.hooks`` for async), so you can capture hook failures through standard Python logging configuration. To ensure your hook doesn't get skipped, wrap risky operations in try/except:
 
    .. code-block:: python
 
@@ -169,7 +198,7 @@ Best Practices
       )
 
 
-5) Built-in Hooks
+6) Built-in Hooks
 =================
 
 throttled-py provides the following built-in hooks:

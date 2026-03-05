@@ -1,10 +1,13 @@
 """Async hook system for throttled-py."""
 
 import abc
-from collections.abc import Awaitable, Callable
+import logging
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
 from ..hooks import HookContext
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..rate_limiter import RateLimitResult
@@ -48,7 +51,7 @@ class Hook(abc.ABC):
 
 
 def build_hook_chain(
-    hooks: list[Hook],
+    hooks: Sequence[Hook],
     do_limit: Callable[[], Awaitable["RateLimitResult"]],
     context: HookContext,
 ) -> Callable[[], Awaitable["RateLimitResult"]]:
@@ -59,7 +62,7 @@ def build_hook_chain(
 
     Exceptions raised in hooks are caught and the chain continues.
 
-    :param hooks: List of async hooks to chain.
+    :param hooks: Sequence of async hooks to chain.
     :param do_limit: The actual async rate limit function to be wrapped.
     :param context: The hook context containing rate limit metadata.
     :return: A callable that executes the async hook chain.
@@ -102,7 +105,7 @@ def build_hook_chain(
                 try:
                     return await h.on_limit(tracked_next, context)
                 except Exception:
-                    # TODO - Logging strategy should be developed
+                    logger.exception("Hook %r raised during on_limit", h)
                     if next_called:
                         return next_result
                     return await next_fn()

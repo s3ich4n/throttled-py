@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -5,9 +6,12 @@ from throttled import (
     HookContext,
     RateLimiterType,
     RateLimitResult,
+    per_sec,
 )
+from throttled.asyncio import Throttled as AsyncThrottled
 from throttled.asyncio.hooks import Hook, build_hook_chain
 from throttled.constants import StoreType
+from throttled.hooks import Hook as SyncHook
 
 
 @pytest.fixture
@@ -144,6 +148,33 @@ class TestBuildHookChain:
         ]
 
     @classmethod
+    async def test_on_limit__exception_logs_error(
+        cls,
+        hook_context: HookContext,
+        rate_limit_result: RateLimitResult,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Hook exception should be logged with logger.exception."""
+
+        class FailingHook(Hook):
+            async def on_limit(self, *args, **kwargs) -> RateLimitResult:  # noqa: PLR6301
+                raise RuntimeError("Hook failed!")
+
+        async def do_limit() -> RateLimitResult:
+            return rate_limit_result
+
+        chain: Callable[[], Awaitable[RateLimitResult]] = build_hook_chain(
+            [FailingHook()], do_limit, hook_context
+        )
+        with caplog.at_level(logging.ERROR, logger="throttled.asyncio.hooks"):
+            await chain()
+
+        assert len(caplog.records) == 1
+        assert "Hook" in caplog.records[0].message
+        assert "raised during on_limit" in caplog.records[0].message
+        assert caplog.records[0].exc_info is not None
+
+    @classmethod
     async def test_on_limit__multi_hooks(
         cls, hook_context: HookContext, rate_limit_result: RateLimitResult
     ) -> None:
@@ -247,3 +278,55 @@ class TestBuildHookChain:
         )
         with pytest.raises(RuntimeError, match="store connection failed"):
             await chain()
+
+
+class _AsyncNoopHook(Hook):
+    async def on_limit(  # noqa: PLR6301
+        self,
+        call_next: Callable[[], Awaitable[RateLimitResult]],
+        context,  # noqa: ANN001
+    ) -> RateLimitResult:
+        return await call_next()
+
+
+class _SyncNoopHook(SyncHook):
+    def on_limit(  # noqa: PLR6301
+        self,
+        call_next: Callable[[], RateLimitResult],
+        context,  # noqa: ANN001
+    ) -> RateLimitResult:
+        return call_next()
+
+
+class _NotAHook:
+    pass
+
+
+class TestHookTypeValidation:
+    @classmethod
+    def test_validate_hooks__rejects_non_hook(cls) -> None:
+        with pytest.raises(TypeError):
+            AsyncThrottled(key="k", quota=per_sec(1), hooks=[_NotAHook()])
+
+    @classmethod
+    def test_validate_hooks__rejects_sync_hook(cls) -> None:
+        with pytest.raises(TypeError):
+            AsyncThrottled(key="k", quota=per_sec(1), hooks=[_SyncNoopHook()])
+
+
+class TestHookContainerBehavior:
+    @classmethod
+    def test_validate_hooks__stores_as_tuple_from_list(cls) -> None:
+        hooks = [_AsyncNoopHook(), _AsyncNoopHook()]
+        throttle = AsyncThrottled(key="k", quota=per_sec(1), hooks=hooks)
+
+        assert isinstance(throttle._hooks, tuple)
+        assert throttle._hooks == tuple(hooks)
+
+    @classmethod
+    def test_validate_hooks__stores_as_tuple_from_tuple(cls) -> None:
+        hooks = (_AsyncNoopHook(), _AsyncNoopHook())
+        throttle = AsyncThrottled(key="k", quota=per_sec(1), hooks=hooks)
+
+        assert isinstance(throttle._hooks, tuple)
+        assert throttle._hooks == hooks
