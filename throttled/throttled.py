@@ -1,7 +1,7 @@
 import abc
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import wraps
 from types import TracebackType
 
@@ -42,6 +42,7 @@ class BaseThrottledMixin:
     )
 
     _REGISTRY_CLASS: type[RateLimiterRegistry] = None
+    _ALLOWED_HOOK_TYPES: tuple[type[HookP], ...] = ()
 
     # Default store for the rate limiter.
     # By default, the global shared MemoryStore is used, when no store is specified.
@@ -62,7 +63,7 @@ class BaseThrottledMixin:
         quota: Quota | None = None,
         store: StoreP | None = None,
         cost: int = 1,
-        hooks: list[HookP] | None = None,
+        hooks: Sequence[HookP] | None = None,
     ):
         """Initializes the Throttled class.
 
@@ -102,7 +103,8 @@ class BaseThrottledMixin:
 
         self._lock: LockP = self._get_lock()
         self._limiter: RateLimiterP | None = None
-        self._hooks: list[HookP] = list(hooks) if hooks else []
+        self._hooks: tuple[HookP, ...] = tuple(hooks) if hooks else ()
+        self._validate_hooks()
 
         self._validate_cost(cost)
         self._cost: int = cost
@@ -124,6 +126,15 @@ class BaseThrottledMixin:
 
             self._limiter = self._limiter_cls(self._quota, self._store)
             return self._limiter
+
+    def _validate_hooks(self) -> None:
+        """Validate that all hooks are of the expected type."""
+        for hook in self._hooks:
+            if not isinstance(hook, self._ALLOWED_HOOK_TYPES):
+                expected = ", ".join(t.__name__ for t in self._ALLOWED_HOOK_TYPES)
+                raise TypeError(
+                    f"Invalid hook type: {type(hook).__name__}. Expected: {expected}"
+                )
 
     @classmethod
     def _validate_cost(cls, cost: int) -> None:
@@ -197,6 +208,8 @@ class BaseThrottledMixin:
 
 class BaseThrottled(BaseThrottledMixin, abc.ABC):
     """Abstract class for all throttled classes."""
+
+    _ALLOWED_HOOK_TYPES = (Hook,)
 
     @abc.abstractmethod
     def __enter__(self) -> RateLimitResult:
