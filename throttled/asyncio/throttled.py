@@ -9,13 +9,15 @@ from ..hooks import HookContext
 from ..throttled import BaseThrottledMixin
 from ..types import KeyT, StoreP
 from ..utils import now_mono_f
-from .hooks import build_hook_chain
+from .hooks import Hook, build_hook_chain
 from .rate_limiter import RateLimiterRegistry, RateLimitResult, RateLimitState
 from .store import MemoryStore
 
 
 class BaseThrottled(BaseThrottledMixin, abc.ABC):
     """Abstract class for all throttled classes."""
+
+    _ALLOWED_HOOK_TYPES = (Hook,)
 
     @abc.abstractmethod
     async def __aenter__(self) -> RateLimitResult:
