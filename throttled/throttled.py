@@ -1,9 +1,11 @@
 import abc
 import threading
 import time
+from _thread import LockType
 from collections.abc import Callable, Sequence
 from functools import wraps
 from types import TracebackType
+from typing import Generic, TypeVar, cast
 
 from .asyncio.hooks import Hook as AsyncHook
 from .asyncio.rate_limiter import BaseRateLimiter as AsyncBaseRateLimiter
@@ -18,15 +20,20 @@ from .rate_limiter import (
     RateLimitState,
     per_min,
 )
+from .rate_limiter.quota_parser import parse as parse_quota
 from .store import MemoryStore
-from .types import KeyT, LockP, RateLimiterTypeT, StoreP
+from .types import KeyT, RateLimiterTypeT, StoreP
 from .utils import now_mono_f
 
 RateLimiterP = BaseRateLimiter | AsyncBaseRateLimiter
 HookP = Hook | AsyncHook
+DecoratorP = Callable[[Callable[..., object]], Callable[..., object]]
+
+_LimiterT = TypeVar("_LimiterT", bound=RateLimiterP)
+_HookT = TypeVar("_HookT", bound=HookP)
 
 
-class BaseThrottledMixin:
+class BaseThrottledMixin(Generic[_LimiterT, _HookT]):
     """Mixin class for async / sync BaseThrottled."""
 
     __slots__ = (
@@ -41,12 +48,12 @@ class BaseThrottledMixin:
         "_hooks",
     )
 
-    _REGISTRY_CLASS: type[RateLimiterRegistry] = None
+    _REGISTRY_CLASS: type[RateLimiterRegistry] | None = None
     _ALLOWED_HOOK_TYPES: tuple[type[HookP], ...] = ()
 
     # Default store for the rate limiter.
     # By default, the global shared MemoryStore is used, when no store is specified.
-    _DEFAULT_GLOBAL_STORE: StoreP = None
+    _DEFAULT_GLOBAL_STORE: StoreP | None = None
 
     # Non-blocking mode constant
     _NON_BLOCKING: float = -1
@@ -60,11 +67,11 @@ class BaseThrottledMixin:
         key: KeyT | None = None,
         timeout: float | None = None,
         using: RateLimiterTypeT | None = None,
-        quota: Quota | None = None,
+        quota: Quota | str | None = None,
         store: StoreP | None = None,
         cost: int = 1,
-        hooks: Sequence[HookP] | None = None,
-    ):
+        hooks: Sequence[_HookT] | None = None,
+    ) -> None:
         """Initializes the Throttled class.
 
         :param key: The unique identifier for the rate limit subject,
@@ -76,6 +83,9 @@ class BaseThrottledMixin:
         :param using: The type of rate limiter to use, you can choose from
             :class:`RateLimiterType`, default: ``token_bucket``.
         :param quota: The quota for the rate limiter, default: 60 requests per minute.
+            It accepts either:
+            - :class:`throttled.rate_limiter.Quota`
+            - A quota DSL string, e.g. ``"100/s burst 200"``
         :param store: The store to use for the rate limiter. By default, it uses
             the global shared :class:`throttled.store.MemoryStore` instance with
             maximum capacity of 1024, so you don't usually need to create it manually.
@@ -90,43 +100,53 @@ class BaseThrottledMixin:
         # TODO Support get cost weight by key.
         self.key: str | None = key
 
-        if timeout is None:
-            timeout = self._NON_BLOCKING
-        self.timeout: float = timeout
+        self.timeout: float = self._NON_BLOCKING if timeout is None else timeout
         self._validate_timeout(self.timeout)
 
-        self._quota: Quota = quota or per_min(60)
-        self._store: StoreP = store or self._DEFAULT_GLOBAL_STORE
-        self._limiter_cls: type[RateLimiterP] = self._REGISTRY_CLASS.get(
-            using or RateLimiterType.TOKEN_BUCKET.value
+        self._quota: Quota = self._parse_quota(quota)
+        default_store: StoreP | None = store or self._DEFAULT_GLOBAL_STORE
+        if default_store is None:
+            raise DataError("Invalid store: store is required for current throttler.")
+        self._store: StoreP = default_store
+
+        if self._REGISTRY_CLASS is None:
+            raise DataError(
+                "Invalid throttler setup: rate limiter registry is not configured."
+            )
+        self._limiter_cls: type[_LimiterT] = cast(
+            "type[_LimiterT]",
+            self._REGISTRY_CLASS.get(using or RateLimiterType.TOKEN_BUCKET.value),
         )
 
-        self._lock: LockP = self._get_lock()
-        self._limiter: RateLimiterP | None = None
-        self._hooks: tuple[HookP, ...] = self._validate_hooks(hooks)
+        self._lock: LockType = self._get_lock()
+        self._limiter: _LimiterT | None = None
+        self._hooks: tuple[_HookT, ...] = self._validate_hooks(hooks)
 
         self._validate_cost(cost)
         self._cost: int = cost
 
     @classmethod
-    def _get_lock(cls) -> LockP:
+    def _get_lock(cls) -> LockType:
         return threading.Lock()
 
     @property
-    def limiter(self) -> RateLimiterP:
+    def limiter(self) -> _LimiterT:
         """Lazily initializes and returns the rate limiter instance."""
-        if self._limiter:
-            return self._limiter
+        limiter = self._limiter
+        if limiter is not None:
+            return limiter
 
         with self._lock:
             # Double-check locking to ensure thread safety.
-            if self._limiter:
-                return self._limiter
+            limiter = self._limiter
+            if limiter is not None:
+                return limiter
 
-            self._limiter = self._limiter_cls(self._quota, self._store)
-            return self._limiter
+            limiter = cast("_LimiterT", self._limiter_cls(self._quota, self._store))
+            self._limiter = limiter
+            return limiter
 
-    def _validate_hooks(self, hooks: Sequence[HookP] | None) -> tuple[HookP, ...]:
+    def _validate_hooks(self, hooks: Sequence[_HookT] | None) -> tuple[_HookT, ...]:
         """Validate that all hooks are of the expected type and return as tuple."""
         if not hooks:
             return ()
@@ -172,6 +192,22 @@ class BaseThrottledMixin:
             f"Invalid timeout: {timeout}, must be a positive float or -1(non-blocking)."
         )
 
+    @classmethod
+    def _parse_quota(cls, quota: Quota | str | None) -> Quota:
+        if quota is None:
+            return per_min(60)
+
+        if isinstance(quota, Quota):
+            return quota
+
+        parsed_quotas = parse_quota(quota)
+        if len(parsed_quotas) > 1:
+            raise DataError(
+                "Invalid quota: multiple quota rules are not supported in "
+                "Throttled(quota=...) yet."
+            )
+        return parsed_quotas[0]
+
     def _get_key(self, key: KeyT | None = None) -> KeyT:
         # Use the provided key if available.
         if key:
@@ -208,7 +244,7 @@ class BaseThrottledMixin:
         return elapsed >= retry_after or elapsed >= timeout
 
 
-class BaseThrottled(BaseThrottledMixin, abc.ABC):
+class BaseThrottled(BaseThrottledMixin[BaseRateLimiter, Hook], abc.ABC):
     """Abstract class for all throttled classes."""
 
     _ALLOWED_HOOK_TYPES = (Hook,)
@@ -228,13 +264,13 @@ class BaseThrottled(BaseThrottledMixin, abc.ABC):
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
-    ):
+    ) -> None:
         """Exit the context manager."""
 
     @abc.abstractmethod
     def __call__(
-        self, func: Callable | None = None
-    ) -> Callable | Callable[[Callable], Callable]:
+        self, func: Callable[..., object] | None = None
+    ) -> Callable[..., object] | DecoratorP:
         """Decorator to apply rate limiting to a function."""
         raise NotImplementedError
 
@@ -295,8 +331,8 @@ class Throttled(BaseThrottled):
         return result
 
     def __call__(
-        self, func: Callable | None = None
-    ) -> Callable | Callable[[Callable], Callable]:
+        self, func: Callable[..., object] | None = None
+    ) -> Callable[..., object] | DecoratorP:
         """Decorator to apply rate limiting to a function.
 
         The cost value is taken from the Throttled instance's initialization.
@@ -316,12 +352,12 @@ class Throttled(BaseThrottled):
         >>> def demo(): pass
         """
 
-        def decorator(f: Callable) -> Callable:
+        def decorator(f: Callable[..., object]) -> Callable[..., object]:
             if not self.key:
                 raise DataError(f"Invalid key: {self.key}, must be a non-empty key.")
 
             @wraps(f)
-            def _inner(*args, **kwargs):
+            def _inner(*args: object, **kwargs: object) -> object:
                 # TODO Add options to ignore state.
                 result: RateLimitResult = self.limit(cost=self._cost)
                 if result.limited:
@@ -382,18 +418,18 @@ class Throttled(BaseThrottled):
         self, key: KeyT | None = None, cost: int = 1, timeout: float | None = None
     ) -> RateLimitResult:
         self._validate_cost(cost)
-        key: KeyT = self._get_key(key)
-        timeout: float = self._get_timeout(timeout)
+        resolved_key: KeyT = self._get_key(key)
+        resolved_timeout: float = self._get_timeout(timeout)
 
         if not self._hooks:
-            return self._do_limit(key, cost, timeout)
+            return self._do_limit(resolved_key, cost, resolved_timeout)
 
         def do_limit() -> RateLimitResult:
-            return self._do_limit(key, cost, timeout)
+            return self._do_limit(resolved_key, cost, resolved_timeout)
 
         # Build the hook chain
         context = HookContext(
-            key=key,
+            key=resolved_key,
             cost=cost,
             algorithm=self._limiter_cls.Meta.type,
             store_type=self._store.TYPE,
