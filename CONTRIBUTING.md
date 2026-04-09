@@ -50,7 +50,7 @@ uv run prek install
 Verify the installation:
 
 ```bash
-# Should list: check-merge-conflict, ruff, ruff-format
+# Should list: check-merge-conflict, ruff, ruff-format, mypy-strict
 uv run prek list
 ```
 
@@ -335,26 +335,24 @@ git rebase origin/main
 
 Do not use merge commits to sync with `main` (for example, `git merge main`).
 
-### 2. Squash and Push
+### 2. Push Your Changes
 
-Before pushing, please squash your commits into a single commit with a valid [Conventional Commits](#commit-conventions) message. CI validates the commit message via commitlint — squashing helps it pass on the first push.
+Push your branch normally. You do not need to squash commits before pushing; the maintainer will squash-merge the PR when it is ready.
 
 ```bash
-# Squash N commits into one
-git rebase -i HEAD~N
+git push origin <your-branch>
+```
 
-# Verify the message format before pushing
-git log --oneline -1
-# Should show: <type>: <description> (#<issue-number>)
+If you rebased onto `main`, you may need to force-push:
 
-# Rebase branch update requires force push
+```bash
 git push --force-with-lease origin <your-branch>
 ```
 
 ### 3. Respond to Reviews
 
 - Please address all review comments before requesting re-review.
-- Rebase and squash again when the maintainer asks you to sync with `main`.
+- Rebase onto `main` when the maintainer asks you to sync.
 - Please re-run prek after making changes to ensure lint checks still pass.
 
 ### 4. CI Checks
@@ -383,4 +381,4 @@ Before submitting your pull request, please verify the following:
 - [ ] No duplicate fixtures
 - [ ] Public API changes include README (EN + ZH), docs, and examples updates
 - [ ] Commit message follows Conventional Commits (`<type>: <description> (#issue)`)
-- [ ] Commits are squashed and rebased onto `main`
+- [ ] Branch is rebased onto `main`
