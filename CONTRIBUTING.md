@@ -370,8 +370,13 @@ All of the following must pass before merging:
 
 Before submitting your pull request, please verify the following:
 
+### Local Checks
+
 - [ ] `uv run prek run --all-files` passes locally
 - [ ] `uv run pytest -n auto tests/ -x` passes locally
+
+### Code and Tests
+
 - [ ] Type annotations added to all variables
 - [ ] Docstrings use reStructuredText style (`:param:`, `:return:`)
 - [ ] Tests are class-based with `@classmethod`
@@ -379,6 +384,12 @@ Before submitting your pull request, please verify the following:
 - [ ] Unit tests follow test mirroring path rules (`throttled/<package>/<module>.py` -> `tests/<package>/test_<module>.py`)
 - [ ] No empty files or unused code
 - [ ] No duplicate fixtures
+
+### Documentation
+
 - [ ] Public API changes include README (EN + ZH), docs, and examples updates
+
+### Branch and Commit
+
 - [ ] Commit message follows Conventional Commits (`<type>: <description> (#issue)`)
 - [ ] Branch is rebased onto `main`
